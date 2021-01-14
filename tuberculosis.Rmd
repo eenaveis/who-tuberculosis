@@ -1,0 +1,165 @@
+---
+title: "WHO Tuberculosis Data - Case Study"
+author: "Emil Sievänen"
+date: "1/14/2021"
+output: html_document
+---
+# Introduction
+
+This notebook showcases basic data analysis process from data cleansing to data visualization and modelling. We will be using tuberculosis data acquired from the [World Health Organization](http://www.who.int/tb/country/data/download/en/), which is included in the `tidyr` package. The data cleansing process will follow the methodology introduced in the book [R for Data Science](https://r4ds.had.co.nz/tidy-data.html#case-study). This case study utilizes the `tidyverse` collection of r packages to manipulate and visualize data. The full source code will be available at the projects [GitHub repository](https://github.com/eenaveis/who-tuberculosis)
+
+# Data Cleansing
+
+As a first step, lets take a quick peek at the data.
+
+```{r dependencies, include = FALSE}
+library(tidyverse)
+```
+
+```{r data_peek, echo = FALSE}
+tidyr::who
+```
+
+As we can see there are columns for country, country ISO codes and year, but then there are wide number of strange looking variables which seem to be values rather than variables. We will need to clean this dataset so that the odd looking variables are converted to values instead. Looking at the data specifications, the variables that we are converting to values actually contain multiple values, so we need to separate those values as well. The final result will contain columns "country", "year", "type", "sex", "age" and "cases". The below code chunk will do the data cleansing for us.
+
+```{r data_cleansing}
+who <- tidyr::who %>%
+  # transform column values into single column
+  pivot_longer(new_sp_m014:newrel_f65, 
+               names_to = "key", 
+               values_to = "cases"
+               ) %>% 
+  # filter missing values
+  filter(!is.na(cases)) %>%
+  # fix "newrel" values to "new_rel"
+  mutate(key = str_replace(key, "newrel", "new_rel")) %>%
+  #separate the values in column "key"
+  separate(key, c("new", "type", "sex_age"), sep = "_") %>%
+  separate(sex_age, c("sex", "age"), sep = 1)
+```
+
+Now we have a nice and clean dataset ready for further analysis. However, we will also drop the "iso" columns and the "new" column as redundant.
+
+```{r selection}
+who <- who %>% 
+  select(-iso2, -iso3, -new)
+```
+
+# Summarising Data
+
+Next, we will summarise the data with the `summarise` function. The below code chunk will create a new `tibble` with a new column representing the average number of tuberculosis by countries in descending order. As we can see, the top 3 countries are: India, China and South Africa.
+
+```{r summarise_by_country}
+who %>% group_by(country) %>%
+  summarise(average_cases = round(mean(cases), 0)) %>%
+  arrange(desc(average_cases))
+```
+
+In the next summary, we will compute the percentages of tuberculosis cases by gender. The below summary reveals that tuberculosis is clearly more common among men than females.
+
+```{r summarise_by_gender}
+who %>% group_by(sex) %>%
+  summarise(total_cases = round((sum(cases) / sum(.$cases) * 100), 0))
+```
+
+The final summary will explain the relation of age to tuberculosis cases. As we can see, there seems to be some relation that tuberculosis is less common in older populations. However, the youngest group, 0-14 years old, has clearly lowest rate of tuberculosis.
+
+```{r summarise_by_age}
+who %>% group_by(age) %>%
+  summarise(average_cases = round(mean(cases), 0)) %>%
+  arrange(average_cases)
+```
+
+# Data Visualization
+
+Now we have a some kind of view about the data we are analysing. To hammer down the point, we will use visualization to gain a deeper understanding of our data before modelling the data. As a first step, lets plot the top 10 countries side by side. 
+
+```{r top_ten_countries1}
+top_ten1 <- who %>%
+  group_by(country) %>%
+  summarise(average_cases = round(mean(cases), 0)) %>%
+  ungroup() %>%
+  arrange(desc(average_cases)) %>%
+  top_n(10)
+
+# Shorten country name for cleaner plot
+top_ten2 <- top_ten1 %>%
+  mutate(country = str_replace(country, 
+                               "Democratic Republic of the Congo", 
+                               "Congo"
+                               )
+         )
+
+ggplot(data = top_ten2) +
+  geom_col(aes(x = country, y = average_cases, fill = country))
+```
+
+This confirms the results we found in the earlier section. Two countries, China and India, have significant average tuberculosis cases compared to the other top 10 countries. Lets see how the average cases vary in different years. We will use the `top_ten1` tibble to filter the original dataset `who` with the `semi_join` function.
+
+```{r top_ten_countries2}
+top_ten3 <- who %>%
+  # limit the original dataset to top 10 countries
+  semi_join(top_ten1, by = "country") %>%
+  group_by(country, year) %>%
+  # calculate average cases per year
+  summarise(average_cases = round(mean(cases), 0)) %>%
+  ungroup()
+
+ggplot(data = top_ten3) +
+  geom_smooth(aes(x = year, y = average_cases, color = country))
+```
+
+From the plot above, we can see that there is clearly a rising trend in the average tuberculosis cases, most notably in the top 3 countries. For the final step, lets plot the average cases by age groups in the below plot.
+
+```{r plot_age_groups}
+age_groups <- who %>%
+  group_by(age) %>%
+  summarise(average_cases = round(mean(cases), 0)) %>%
+  arrange(average_cases)
+
+ggplot(data = age_groups) +
+  geom_col(aes(x = age, y = average_cases, fill = age)) +
+  # add median line to the plot
+  geom_abline(slope = 0, 
+              intercept = median(age_groups$average_cases),
+              color = "red",
+              lty = 2)
+```
+
+As we can see, the age groups from 15 to 44 are above the median line and the age groups 0-14 and 45-65 are below the median line. This indicates in some degree that tuberculosis is less common in the older age groups. We will confirm this relation in the next section of this case study.
+
+# Modelling Data
+
+We have now gained enough information about our data, so we can use modelling to find evidence about the relation of age and gender to the average tuberculosis cases. We will do this with simple linear regression which can be modelled with the `lm` function.
+
+Our first model will be in the form of: 
+
+$$cases = \beta_0 + \beta_1age\_group + \epsilon$$
+
+We start by creating a dummy variable for age groups forming two variables: "young" and "old". We will exclude the youngest age group (0-14) as an outlier.
+
+```{r model_data}
+model_data <- who %>%
+  filter(age != "014") %>%
+  mutate(age_group = ifelse(age == "1524" | age == "2543" | age == "3544",
+         "young", "old"))
+```
+
+Then we run the linear regression.
+```{r model_one}
+model1 <- lm(cases ~ age_group, data = model_data)
+summary(model1)
+```
+
+The variable age_group has a positive and statistically significant coefficient at the 5% level of significance. This confirms that the age groups have significant effect on the tuberculosis cases. Lets add the gender variable to our model. Now the model will be in the form of:
+
+$$cases = \beta_0 + \beta_1age\_group + \beta_2sex + \epsilon$$
+
+```{r model_two}
+model2 <- lm(cases ~ age_group + sex, data = model_data)
+summary(model2)
+```
+
+The coefficients for the two variables are again positive and statistically significant, indicating that both variables have significant effect on tuberculosis cases.
+
+This concludes our analysis this time. We cleaned a dataset and computed summarising values. Then we visualized the data and finally applied modelling to our data. Next time, we will visualize some recent covid-19 data. Don't forget to check out my other [projects](https://eenaveis.github.io/)!
